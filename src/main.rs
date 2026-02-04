@@ -1,14 +1,21 @@
 use std::{io, thread};
 use std::collections::HashMap;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration};
 use clap::Parser;
 use env_logger::Builder;
 use log::LevelFilter;
 use tiny_http::{Request, Response, Server, StatusCode};
 use flapit_server::{Message, Protocol};
 use flapit_server::Message::{Echo};
+
+type Serial = String;
+
+struct Device {
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+}
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
@@ -21,32 +28,46 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", args.device_port))?;
     let http = Server::http(format!("0.0.0.0:{}", args.api_port)).unwrap();
 
-    let devices: Arc<Mutex<HashMap<String, (SystemTime, TcpStream)>>> = Arc::new(Mutex::new(HashMap::new()));
+    let devices: Arc<Mutex<HashMap<Serial, Device>>> = Arc::new(Mutex::new(HashMap::new()));
     let devices_clone = Arc::clone(&devices);
 
     thread::spawn(move || {
         for request in http.incoming_requests() {
+            log::debug!("Incoming http request on {} from {}", request.url(), request.remote_addr().unwrap());
             let devices_clone = Arc::clone(&devices);
-            thread::spawn(move || -> io::Result<()> {
-                let _ = handle_http(request, devices_clone).map_err(|e| eprintln!("Error: {}", e));
-                Ok(())
-            });
+            let _ = handle_http(request, devices_clone).map_err(|e| eprintln!("Error: {}", e));
         }
     });
 
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
             let devices_clone = Arc::clone(&devices_clone);
-            thread::spawn(move || -> io::Result<()> {
+            thread::spawn(move || {
                 let _ = handle_connection(stream, devices_clone).map_err(|e| eprintln!("Error: {}", e));
-                Ok(())
             });
         }
     }
+
     Ok(())
 }
 
-fn handle_http(mut request: Request, devices: Arc<Mutex<HashMap<String, (SystemTime, TcpStream)>>>) -> io::Result<()> {
+fn remove_device(serial: &str, peer_addr: SocketAddr, devices: Arc<Mutex<HashMap<Serial, Device>>>) {
+    let mut devices = devices.lock().unwrap();
+    if let Some(device) = devices.get(serial) {
+        if peer_addr == device.peer_addr {
+            devices.remove(serial);
+            log::info!("{} Removed!", serial);
+        }
+    }
+}
+
+fn handle_http(mut request: Request, devices: Arc<Mutex<HashMap<Serial, Device>>>) -> io::Result<()> {
+    if request.url() != "/" {
+        request.respond(Response::new_empty(StatusCode::from(404)))?;
+
+        return Ok(());
+    }
+
     let mut content = String::new();
     request.as_reader().read_to_string(&mut content)?;
 
@@ -60,15 +81,14 @@ fn handle_http(mut request: Request, devices: Arc<Mutex<HashMap<String, (SystemT
     }
 
     let message = Message::SetCounterValue(parameters["message"].clone());
+    let serial = parameters["device"].as_str();
 
-    if let Some((_, stream)) = devices.lock().unwrap().get(parameters["device"].as_str()) {
-        let response = Response::new_empty(StatusCode::from(202));
-        request.respond(response)?;
+    if let Some(device) = devices.lock().unwrap().get(serial) {
+        request.respond(Response::new_empty(StatusCode::from(202)))?;
 
-        let mut protocol = Protocol::with_stream(stream.try_clone()?)?;
+        let mut protocol = Protocol::with_stream(device.stream.try_clone()?)?;
         if protocol.send_message(&message).is_err() {
-            devices.lock().unwrap().remove(parameters["device"].as_str());
-            log::debug!("{} Removed!", parameters["device"].as_str());
+            remove_device(serial, device.peer_addr, devices.clone());
         }
 
         return Ok(());
@@ -80,52 +100,48 @@ fn handle_http(mut request: Request, devices: Arc<Mutex<HashMap<String, (SystemT
     Ok(())
 }
 
-fn handle_connection(stream: TcpStream, devices: Arc<Mutex<HashMap<String, (SystemTime, TcpStream)>>>) -> io::Result<()> {
+fn handle_connection(stream: TcpStream, devices: Arc<Mutex<HashMap<String, Device>>>) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(60)))?;
     let peer_addr = stream.peer_addr()?;
     let mut protocol = Protocol::with_stream(stream.try_clone()?)?;
     let mut serial: Option<String> = None;
-    let handle_time = SystemTime::now();
+    let mut wait_for_echo = false;
 
     loop {
         let message = match protocol.read_message::<Message>() {
             Ok(m) => m,
-            Err(_) => {
-                log::debug!("Sending Echo");
-                if protocol.send_message(&Echo()).is_ok() {
-                    if let Ok(message) = protocol.read_message::<Message>() {
-                        message
-                    } else {
-                        break
+            Err(e) if (e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock) && serial.is_some() => {
+                match wait_for_echo {
+                    true => break,
+                    false => {
+                        log::debug!("Sending Echo");
+                        let _ = protocol.send_message(&Echo());
+                        wait_for_echo = true;
+                        continue
                     }
-                } else {
-                    break
                 }
-            }
+            },
+            Err(_) => break
         };
+
         log::debug!("Incoming {:?} [{}]", message, peer_addr);
 
         match message {
             Message::AuthAssociate(s, _, _) => {
                 protocol.send_message(&Message::Ok())?;
                 serial = Some(s.clone());
-                devices.lock().unwrap().insert(s, (handle_time, stream.try_clone()?));
+                devices.lock().unwrap().insert(s.clone(), Device { stream: stream.try_clone()?, peer_addr });
+                log::info!("{} Associated!", s);
             },
+            Echo() => wait_for_echo = false,
             _ => ()
         }
     }
+
     if serial.is_some() {
-        let mut devices = devices.lock().unwrap();
-        match devices.get(&serial.clone().unwrap()) {
-            Some((saved_time, _)) => {
-                if saved_time == &handle_time {
-                    devices.remove(&serial.clone().unwrap());
-                    log::debug!("{} Removed!", serial.unwrap());
-                }
-            },
-            None => ()
-        }
+        remove_device(&serial.unwrap(), peer_addr, devices.clone());
     }
+
     Ok(())
 }
 
