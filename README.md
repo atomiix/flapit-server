@@ -12,9 +12,19 @@ I think it could be possible to use a Raspberry Pi or something equivalent (even
 
 ## How to use
 
+### Using Docker
+
+`$ docker run -p 443:443 -p 3000:3000 -it --rm ghcr.io/atomiix/flapit-server:latest`
+
+##### With verbose mode
+
+`$ docker run -p 443:443 -p 3000:3000 -it --rm ghcr.io/atomiix/flapit-server:latest -v`
+
+### Using the binary
+
 Download the latest binary according to your OS/processor architecture:
 
-`$ wget https://github.com/atomiix/Flapit-server/releases/download/v0.0.3/x86_64-unknown-linux-gnu.zip`
+`$ wget https://github.com/atomiix/Flapit-server/releases/latest/download/x86_64-unknown-linux-gnu.zip`
 
 Unzip the binary:
 
@@ -68,6 +78,6 @@ And start it:
 
 ### Use the API
 
-`$ curl -d device=FLP1-1234567890 -d message=hello http://flapitserverip:3000`
+`$ curl -d device="FLP1-1234567890" -d message=":) hello" http://flapitserverip:3000`
 
 The `message` format is the same as described in the [Flapit API documentation](https://www.flapit.com/en/api.html)
