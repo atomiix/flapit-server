@@ -4,6 +4,9 @@ This project is the result of the reverse engineering of the communication betwe
 
 ## ⚠️ DNS workaround
 
+> [!TIP]
+> No workaround needed when using [FlapOS](https://atomiix.github.io/FlapOS/)
+
 Because the Flapit device has an hardcoded endpoint (hub.flapit.com), we need to find a way to redirect the endpoint to our custom server.
 
 As I’m already running [pihole](https://pi-hole.net/) on my local network, I added a custom DNS entry that redirect hub.flapit.com to the IP address flapit_server is running on.
