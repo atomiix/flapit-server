@@ -49,11 +49,18 @@ pub enum Message {
     Idle(),
 }
 
+const MAX_ARG_LENGTH: u32 = 254; // max arg length is email address
+const MAX_MESSAGE_LENGTH: u32 = MAX_ARG_LENGTH + 50; // 50 is the minimum message length for auth
+
 impl Deserialize for Message {
     type Output = Message;
 
     fn deserialize(buf: &mut (impl Read + BufRead)) -> io::Result<Self::Output> {
         let size = buf.read_u32::<NetworkEndian>()?;
+        if size > MAX_MESSAGE_LENGTH {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "message size exceeded"));
+        }
+
         let message_type = buf.read_u32::<NetworkEndian>()?;
 
         let mut data = 4;
@@ -62,6 +69,9 @@ impl Deserialize for Message {
         let mut index = 0;
         while data < size {
             let string_len = buf.read_u32::<NetworkEndian>()?;
+            if string_len > MAX_ARG_LENGTH {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "arg size exceeded"));
+            }
             let mut string_buf = vec![0u8; string_len as usize];
             buf.read_exact(&mut string_buf)?;
             args[index] = String::from_utf8(string_buf).unwrap();

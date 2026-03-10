@@ -121,7 +121,10 @@ fn handle_connection(stream: TcpStream, devices: Arc<Mutex<HashMap<String, Devic
                     }
                 }
             },
-            Err(_) => break
+            Err(e) => {
+                log::debug!("Error: {} from {}", e, peer_addr);
+                break
+            }
         };
 
         log::debug!("Incoming {:?} [{}]", message, peer_addr);
